@@ -165,7 +165,7 @@
   const ins = s => `<span class="insigna ${s}">${s === "ok" ? "îndeplinită" : "neîndeplinită"}</span>`;
 
   const TAB = [["dim", "Mase și dimensionare (cap. 1–3)"], ["wltc", "Validare WLTC"], ["sarc", "Traseu și sarcină utilă (cap. 2, 5)"], ["zi", "Tura zilnică (cap. 3, 5)"],
-    ["pto", "Agregat frigorific (cap. 4)"], ["inc", "Încărcare la depou (cap. 6)"], ["cost", "Cost pe km (cap. 7)"], ["ver", "Verificări (§10.2)"]];
+    ["pto", "Agregat frigorific (cap. 4)"], ["cic", "Cicluri de conducere (§2.2, §8.7)"], ["inc", "Încărcare la depou (cap. 6)"], ["cost", "Cost pe km (cap. 7)"], ["ver", "Verificări (§10.2)"]];
   function render() {
     const ch = checks(R), n = ch.filter(c => c[2] === "ok").length;
     const k = [["Tura zilnică iarna, SOH " + fmt(S.q.soh * 100, 0) + " %", fmt(R.days[3].de, 0), "km"], ["Consum pe traseu, încărcat", fmt(R.days[1].e, 1), "kWh/100 km"],
@@ -174,8 +174,9 @@
       <div class="stare ${n === ch.length ? "stare-ok" : "stare-atentie"}">${NUME[S.key]}: ${n} din ${ch.length} verificări îndeplinite${n === ch.length ? "." : " – vezi fila Verificări."}</div>`;
     $("#taburi").innerHTML = TAB.map(([k, t]) => `<button type="button" role="tab" data-tab="${k}" aria-selected="${k === S.tab}">${t}</button>`).join("");
     $("#taburi").querySelectorAll("button").forEach(b => b.addEventListener("click", () => { S.tab = b.dataset.tab; render(); }));
-    const F = { dim: tDim, wltc: tW, sarc: tS, zi: tZ, pto: tP, inc: tI, cost: tC, ver: () => tabel(["Verificare", "Valoare", "Stare"], checks(R).map(c => [c[0], c[1], ins(c[2])])) };
+    const F = { dim: tDim, wltc: tW, sarc: tS, zi: tZ, pto: tP, cic: tCic, inc: tI, cost: tC, ver: () => tabel(["Verificare", "Valoare", "Stare"], checks(R).map(c => [c[0], c[1], ins(c[2])])) };
     $("#continut").innerHTML = F[S.tab]();
+    hookCic();
     $("#continut").insertAdjacentHTML("beforeend", `<div class="doar-tipar">${TAB.filter(t => t[0] !== S.tab).map(([k, t]) => `<section class="foaie-tipar"><h2>${t}</h2>${F[k]()}</section>`).join("")}</div>`);
   }
   function tDim() {
@@ -249,9 +250,56 @@
       `<div class="grafice">${grafic({ titlu: "Costul pe kilometru în funcție de kilometrajul anual", xEt: "kilometraj anual [mii km]", yEt: "eurocenți/km", serii: [{ x: kms.map(k => k / 1000), y: kms.map(k => r.evk(k).total * 100), nume: "electric" }, { x: kms.map(k => k / 1000), y: kms.map(k => r.dk(k).total * 100), nume: "diesel", cls: 1 }], xMin: 10, xMax: 60 })}</div>`;
   }
 
+
+  // ---------------------------------------------------------------- ciclurile de conducere (calcul la cerere, durează 1–3 s)
+  let CYC = null, cycKey = "";
+  function cycList() {
+    const L0 = CICLURI.lista.map(m => ({ k: m.k, nm: m.nm, o: m.o, t: m.t, v: m.k === "wltc3b" ? V0 : CICLURI.date[m.k].map(x => x / 3.6) }));
+    CICLURI.faze.forEach(p => L0.push({ k: "wltc_" + p.nm, nm: "WLTC – faza " + p.nm, o: "UE", t: "fază", v: V0.slice(p.a, p.b + 1) }));
+    L0.push({ k: "traseu", nm: "Traseul de livrări (§2.3)", o: "parametric", t: "livrări", v: L.deliveryRoute(S.r).v });
+    return L0;
+  }
+  function cycCompute() {
+    const key = JSON.stringify([S.v, S.r]);
+    if (CYC && cycKey === key) return CYC;
+    const plMax = S.v.gvw - S.v.m_curb - 75, c0 = cfgFor(0), c1 = cfgFor(plMax);
+    CYC = cycList().map(cy => {
+      const st = L.cycleStats(cy.v), s0 = L.simulate(c0, cy.v, { soc0: 0.9 }), s1 = L.simulate(c1, cy.v, { soc0: 0.9 }), rr = L.rangeCycle(c1, cy.v);
+      return { k: cy.k, nm: cy.nm, o: cy.o, t: cy.t, st, e0: s0.e_bat, e1: s1.e_bat, rng: rr.range_km, rec: s1.energy.regen / Math.max(s1.energy.wheel_pos, 1e-9), nf: s1.nofollow / Math.max(s1.steps, 1) };
+    });
+    cycKey = key; return CYC;
+  }
+  function tCic() {
+    const key = JSON.stringify([S.v, S.r]);
+    if (!(CYC && cycKey === key)) return `<div class="cic-asteapta" data-cic="1"><p class="nota">Se calculează consumul pe ${CICLURI.lista.length + CICLURI.faze.length + 1} cicluri…</p></div>`;
+    const plMax = S.v.gvw - S.v.m_curb - 75, E = fmt(cfgFor(0).bat.E_nom, 1);
+    const rows = []; let sec = "";
+    CYC.forEach(c => {
+      const s2 = c.t === "fază" ? "Fazele ciclului WLTC" : c.k === "traseu" ? "Traseul temei" : "Cicluri complete";
+      if (s2 !== sec) { rows.push({ sectiune: s2 }); sec = s2; }
+      rows.push([`<span style="white-space:nowrap">${c.nm}</span>`, fmt(c.st.v_med, 1), fmt(c.st.stops_km, 1), fmt(c.e0, 1), fmt(c.e1, 1), "+" + fmt((c.e1 / c.e0 - 1) * 100, 0) + " %", fmt(c.rec * 100, 0) + " %", fmt(c.rng, 0)]);
+    });
+    const main = CYC.filter(c => c.t !== "fază");
+    let x = `<p class="nota">Vehiculul din formular, gol și încărcat (${fmt(plMax, 0)} kg), la 23 °C, fără climatizare. Autonomia: ciclul repetat de la SOC maxim la SOC minim, încărcat, bateria nouă (${E} kWh nominal).</p>`;
+    x += tabel(["Ciclul", "v<sub>med</sub>", "Opriri/km", "e gol", "e încărcat", "Creștere", "Recuperat", "Autonomie"], rows);
+    x += `<p class="nota">v<sub>med</sub> în km/h; e în kWh/100 km, la baterie; „Recuperat” = energia recuperată la frânare, raportată la energia la roată; autonomia în km, încărcat.</p>`;
+    x += `<div class="grafice">${bare("Consumul încărcat pe cicluri [kWh/100 km]", main.map(c => c.nm), main.map(c => c.e1), "")}
+      ${bare("Autonomia încărcat pe cicluri", main.map(c => c.nm), main.map(c => c.rng), "km")}</div>`;
+    const us = CYC.find(c => c.k === "us06");
+    if (us && us.nf > 0.001) x += `<p class="nota">US06, încărcat: vehiculul nu urmărește accelerațiile ciclului în ${fmt(us.nf * 100, 1)} % din timp (limita de putere sau de cuplu).</p>`;
+    x += `<p class="nota">Descărcați un ciclu: <select id="sel-cic">${cycList().map(c => `<option value="${c.k}">${c.nm}</option>`).join("")}</select> <button type="button" id="btn-cic">Descarcă (CSV)</button></p>`;
+    return x;
+  }
+  function hookCic() {
+    const w = document.querySelector("#continut > [data-cic]");
+    if (w) setTimeout(() => { try { cycCompute(); render(); } catch (e) { w.innerHTML = `<div class="alerta">${esc(e.message)}</div>`; } }, 30);
+    const b = document.getElementById("btn-cic");
+    if (b) b.addEventListener("click", () => { const k = $("#sel-cic").value, c = cycList().find(q => q.k === k); download("ciclu_" + k + ".csv", "t [s];v [km/h]\n" + c.v.map((x, i) => i + ";" + String(+(x * 3.6).toFixed(3)).replace(".", ",")).join("\n")); });
+  }
+
   function download(name, text) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob(["﻿" + text], { type: "text/csv;charset=utf-8" })); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); }
   $("#btn-csv").addEventListener("click", () => { if (!R) return; const pp = R.route.pto; download("tura_" + S.key + ".csv", "t [s];v [km/h];P_roata [kW];P_motor [kW];P_baterie [kW];SOC [%];T_baterie [°C];P_ePTO [kW]\n" + R.route.hist.map((x, k) => [x[0], x[1], x[2], x[3], x[4], x[5] * 100, x[6], pp ? pp[k] / 1e3 : 0].map(v => String(+Number(v).toFixed(4)).replace(".", ",")).join(";")).join("\n")); });
   $("#btn-ciclu").addEventListener("click", () => download("wltc_clasa3b.csv", "t [s];v [km/h]\n" + VK.map((v, i) => i + ";" + String(v).replace(".", ",")).join("\n")));
-  $("#btn-print").addEventListener("click", () => window.print());
+  $("#btn-print").addEventListener("click", () => { try { if (R) { cycCompute(); render(); } } catch (e) { console.error(e); } window.print(); });
   initState("EJ75"); renderForm(); compute();
 })();

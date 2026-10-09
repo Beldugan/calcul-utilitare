@@ -250,9 +250,23 @@
   // ---------------------------------------------------------------- autonomie
   function rangeCycle(cfg, v, Ta, hvac, Tb0) {
     const b = cfg.bat;
-    const r = simulate(cfg, v, { soc0: b.soc_max, T_amb: Ta === undefined ? 23 : Ta, T_bat0: Tb0, hvac: !!hvac, stop_soc: b.soc_min, n_rep: 80 });
+    let d = 0; for (let i = 0; i < v.length - 1; i++) d += 0.5 * (v[i] + v[i + 1]);
+    const nrep = Math.max(80, Math.ceil(800 / Math.max(d / 1000, 0.1)));   // destule repetări și pentru ciclurile scurte (NYCC)
+    const r = simulate(cfg, v, { soc0: b.soc_max, T_amb: Ta === undefined ? 23 : Ta, T_bat0: Tb0, hvac: !!hvac, stop_soc: b.soc_min, n_rep: nrep });
     r.range_km = r.dist_km; r.e_grid = r.E_bat_kWh / cfg.eta_ac / r.dist_km * 100;
     return r;
+  }
+  // caracteristicile unui ciclu (v în m/s, pas 1 s)
+  function cycleStats(v) {
+    const dur = v.length - 1; let d = 0, nstop = 0, nst = 0, sa = 0, na = 0;
+    const st = x => x < 0.5 / 3.6;
+    for (let i = 0; i < dur; i++) {
+      d += 0.5 * (v[i] + v[i + 1]);
+      if (st(v[i + 1]) && !st(v[i])) nstop++;
+      const a = v[i + 1] - v[i]; if (a > 0.1) { sa += a; na++; }
+    }
+    for (let i = 0; i <= dur; i++) if (st(v[i])) nst++;
+    return { dur, d_km: d / 1000, v_med: d / dur * 3.6, v_max: Math.max(...v) * 3.6, stop: nst / (dur + 1), stops_km: nstop / Math.max(d / 1000, 1e-9), a_pos: na ? sa / na : 0 };
   }
   function rangeConst(cfg, vkmh, Ta, hvac) {
     const v = new Array(3601).fill(vkmh / 3.6), b = cfg.bat;
@@ -339,7 +353,7 @@
   }
 
   const API = { G, RHO_AIR, PI30, interp, linspace, wheelDemand, pRoad, capCycle, emTmax, emSetup, emElec, OCV, ocvCell, packSetup, rPack,
-    batStep, hvacPower, driveOptions, regenShare, maxWheelForce, simulate, accel, vMax, vPhys, gradeStart, gradeCont, rangeCycle, rangeConst,
+    batStep, hvacPower, driveOptions, regenShare, maxWheelForce, simulate, accel, vMax, vPhys, gradeStart, gradeCont, rangeCycle, rangeConst, cycleStats,
     chargeCurve, tco, co2, build, wltpTestMass, deliveryRoute, ptoProfile, routeSim, tcoKm };
   if (typeof module !== "undefined") module.exports = API; else root.LCV = API;
 })(this);
